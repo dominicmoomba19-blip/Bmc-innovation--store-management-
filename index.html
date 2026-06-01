@@ -127,6 +127,18 @@ try {
     if (user) {
       window._authReady = true;
       window._uid = user.uid;
+      // Prefetch cloud PINs into localStorage immediately so the login screen
+      // uses the correct PIN even before Firestore listeners are fully set up.
+      getDocs(collection(db, 'settings')).then(snap => {
+        snap.forEach(d => {
+          if (d.id === 'pins') {
+            const data = d.data();
+            const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} };
+            if (data.ownerPin) save('shades_pin', data.ownerPin);
+            if (data.staffPin) save('shades_staffPin', data.staffPin);
+          }
+        });
+      }).catch(() => {});
       // If listeners were waiting for auth, start them now
       if (window._authReadyCb) { window._authReadyCb(); window._authReadyCb = null; }
     }
