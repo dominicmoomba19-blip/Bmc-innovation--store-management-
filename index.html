@@ -114,7 +114,13 @@ try {
   // Firestore rules will require this auth before allowing any read/write
   signInAnonymously(auth).catch(e => {
     console.warn('Anonymous auth failed:', e.code);
-    // App still works offline — sync will retry when auth succeeds
+    // Auth failed — still start Firestore listeners so the app doesn't hang silently.
+    // If Firestore rules require auth, onSnapshot will surface a visible
+    // permission-denied error in Settings instead of freezing at "Syncing".
+    if (!window._authReady) {
+      window._authReady = true;
+      if (window._authReadyCb) { window._authReadyCb(); window._authReadyCb = null; }
+    }
   });
 
   onAuthStateChanged(auth, user => {
