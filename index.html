@@ -1348,6 +1348,18 @@ function lsLoadAll() {
   document.documentElement.setAttribute('data-theme', savedTheme);
 }
 
+// ── PIN CLOUD SYNC ──
+// Writes the current PIN hashes to Firestore so all devices stay in sync.
+function savePinsToFirestore() {
+  if (window._DEMO || !window._db || !window._authReady) return;
+  const ownerHash = lsLoad('pin');
+  const staffHash = lsLoad('staffPin');
+  window._fs.setDoc(
+    window._fs.doc(window._db, 'settings', 'pins'),
+    { ownerPin: ownerHash || null, staffPin: staffHash || null, updatedAt: window._fs.serverTimestamp() }
+  ).catch(e => console.warn('PIN cloud save failed:', e));
+}
+
 // ═══════════════════════════════════════════════════════════
 //  XSS ESCAPE HELPER — use for ALL user-supplied text in innerHTML
 // ═══════════════════════════════════════════════════════════
@@ -2232,6 +2244,7 @@ async function verifyPin() {
     if (_pinBuffer === _newPinTemp) {
       const hash = await hashPin(_newPinTemp);
       lsSave('pin', hash);
+      savePinsToFirestore();
       document.getElementById('pin-overlay').classList.remove('open');
       _pinMode = 0; _newPinTemp = ''; _pinBuffer = '';
       showToast('Owner PIN changed ✓','success');
@@ -2263,6 +2276,7 @@ async function verifyPin() {
     if (_pinBuffer === _newPinTemp) {
       const hash = await hashPin(_newPinTemp);
       lsSave('staffPin', hash);
+      savePinsToFirestore();
       document.getElementById('pin-overlay').classList.remove('open');
       _pinMode = 0; _newPinTemp = ''; _pinBuffer = '';
       showToast('Staff PIN changed ✓','success');
@@ -3164,6 +3178,15 @@ function setupFirestoreListeners() {
         if (getCurrentSection()==='settings') renderSettings();
       });
     });
+
+    // Sync PINs across devices — listen to settings/pins document
+    onSnapshot(window._fs.doc(window._db, 'settings', 'pins'), snap => {
+      if (snap.exists()) {
+        const d = snap.data();
+        if (d.ownerPin) lsSave('pin', d.ownerPin);
+        if (d.staffPin) lsSave('staffPin', d.staffPin);
+      }
+    }, err => console.warn('PIN sync error:', err.code));
   }
 }
 
