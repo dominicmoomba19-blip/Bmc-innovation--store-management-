@@ -127,9 +127,9 @@ try {
     if (user) {
       window._authReady = true;
       window._uid = user.uid;
-      // Prefetch cloud PINs into localStorage immediately so the login screen
-      // uses the correct PIN even before Firestore listeners are fully set up.
-      getDocs(collection(db, 'settings')).then(snap => {
+      // Prefetch cloud PINs — store as a promise so _loginAttempt can await it
+      // before checking the PIN, eliminating any race condition.
+      window._pinsFetched = getDocs(collection(db, 'settings')).then(snap => {
         snap.forEach(d => {
           if (d.id === 'pins') {
             const data = d.data();
@@ -1476,6 +1476,9 @@ function _loginShake(msg) {
   setTimeout(() => { _loginBuf = ''; _updateLoginDots(false); document.getElementById('login-error').textContent = ''; }, 700);
 }
 async function _checkLoginPin() {
+  // Wait for cloud PIN fetch to finish before reading localStorage —
+  // ensures we always check against the latest synced PIN, not a stale local one.
+  if (window._pinsFetched) await window._pinsFetched.catch(() => {});
   const storedHash = _loginRole === 'owner' ? lsLoad('pin') : lsLoad('staffPin');
   const defaultPin = _loginRole === 'owner' ? '1234' : '0000';
   let match = false;
