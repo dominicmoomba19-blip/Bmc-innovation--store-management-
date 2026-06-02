@@ -1330,6 +1330,7 @@ const state = {
   charts: {},
   reportsUnlocked: false,
   dashPeriod: '7d',
+  dashCompare: false,
   invFilter: 'all',
   salesPage: 0, salesSort: 'date', salesDir: 'desc',
   expPage: 0,
@@ -1663,6 +1664,8 @@ function renderDashboard() {
   const filteredSales    = applyFilters(state.sales,    ['product','status']);
   const filteredExpenses = applyFilters(state.expenses, ['category','description']);
   const filteredReturns  = applyFilters(state.returns,  ['product','reason']);
+  // Cache for chart click handlers
+  state._filteredExpenses = filteredExpenses;
 
   const completed  = filteredSales.filter(s=>s.status==='completed');
   const totalRev   = completed.reduce((s,e)=>s+(e.amount||0),0);
@@ -1726,6 +1729,7 @@ function renderDashboard() {
             <button class="chart-tab${state.dashPeriod==='7d'?' active':''}" onclick="setDashPeriod('7d')">7 Days</button>
             <button class="chart-tab${state.dashPeriod==='14d'?' active':''}" onclick="setDashPeriod('14d')">14 Days</button>
             <button class="chart-tab${state.dashPeriod==='month'?' active':''}" onclick="setDashPeriod('month')">Month</button>
+            <button class="chart-tab${state.dashCompare?' active':''}" onclick="toggleDashCompare()" title="Overlay last period for comparison">vs Last</button>
           </div>
         </div>
         <div class="chart-wrap" style="height:190px"><canvas id="chart-daily"></canvas></div>
@@ -1738,7 +1742,7 @@ function renderDashboard() {
     // Full charts for owner
     document.getElementById('charts-row1').innerHTML = `
       <div class="chart-card"><div class="chart-title">Revenue vs Expenses — Last 6 Months</div><div class="chart-wrap" style="height:210px"><canvas id="chart-rev-exp"></canvas></div></div>
-      <div class="chart-card"><div class="chart-title">Expense Breakdown${filterLabel?' <span style="font-size:11px;font-weight:400;color:var(--muted)">· '+filterLabel+'</span>':''}</div><div class="chart-wrap" style="height:210px"><canvas id="chart-pie"></canvas></div></div>
+      <div class="chart-card"><div class="chart-title">Expense Breakdown${filterLabel?' <span style="font-size:11px;font-weight:400;color:var(--muted)">· '+filterLabel+'</span>':''}</div><div class="chart-wrap" style="height:210px"><canvas id="chart-pie"></canvas></div><div id="pie-drilldown" style="margin-top:8px"></div></div>
     `;
     document.getElementById('charts-row2').innerHTML = `
       <div class="chart-card">
@@ -1748,6 +1752,7 @@ function renderDashboard() {
             <button class="chart-tab${state.dashPeriod==='7d'?' active':''}" onclick="setDashPeriod('7d')">7 Days</button>
             <button class="chart-tab${state.dashPeriod==='14d'?' active':''}" onclick="setDashPeriod('14d')">14 Days</button>
             <button class="chart-tab${state.dashPeriod==='month'?' active':''}" onclick="setDashPeriod('month')">Month</button>
+            <button class="chart-tab${state.dashCompare?' active':''}" onclick="toggleDashCompare()" title="Overlay last period for comparison">vs Last</button>
           </div>
         </div>
         <div class="chart-wrap" style="height:190px"><canvas id="chart-daily"></canvas></div>
@@ -1791,7 +1796,27 @@ function renderDashboard() {
     const pieColors = ['#3b82f6','#8b5cf6','#06b6d4','#10b981','#f59e0b'];
     destroyChart('pie');
     const ctx2 = document.getElementById('chart-pie').getContext('2d');
-    state.charts['pie'] = new Chart(ctx2,{type:'doughnut',data:{labels:pieLabels,datasets:[{data:pieData,backgroundColor:pieColors,borderWidth:0,hoverOffset:6}]},options:{responsive:true,maintainAspectRatio:false,cutout:'58%',plugins:{legend:{position:'bottom',labels:{color:cd.text,font:{family:'Epilogue',size:11},padding:12}},tooltip:{backgroundColor:cd.bg,titleColor:isDark()?'#e8edf5':'#0f172a',bodyColor:cd.text,borderColor:'#1e2d45',borderWidth:1,callbacks:{label:c=>`K${c.parsed.toFixed(2)}`}}}}});
+    const _escHtml = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    state.charts['pie'] = new Chart(ctx2,{type:'doughnut',data:{labels:pieLabels,datasets:[{data:pieData,backgroundColor:pieColors,borderWidth:0,hoverOffset:6}]},options:{responsive:true,maintainAspectRatio:false,cutout:'58%',onClick:(evt,elements)=>{
+      const dd = document.getElementById('pie-drilldown');
+      if (!dd) return;
+      if (!elements.length) { dd.innerHTML=''; return; }
+      const cat = pieLabels[elements[0].index];
+      const color = pieColors[elements[0].index % pieColors.length];
+      const items = (state._filteredExpenses||[]).filter(e=>e.category===cat).sort((a,b)=>(b.amount||0)-(a.amount||0));
+      const total = items.reduce((s,e)=>s+(e.amount||0),0);
+      dd.innerHTML = `<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:4px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-size:12px;font-weight:700;color:${color}">${_escHtml(cat)}</span>
+          <span style="font-size:12px;font-weight:700;color:var(--text)">K${fmt(total)}</span>
+        </div>
+        ${items.slice(0,6).map(e=>`<div style="display:flex;justify-content:space-between;font-size:11.5px;padding:4px 0;border-bottom:1px solid var(--border)">
+          <span style="color:var(--muted);flex:1;margin-right:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_escHtml(e.description||'—')}</span>
+          <span style="color:var(--text);font-weight:600;flex-shrink:0">K${fmt(e.amount||0)}</span>
+        </div>`).join('')}
+        ${items.length>6?`<div style="font-size:11px;color:var(--muted);margin-top:6px;text-align:center">+${items.length-6} more</div>`:''}
+      </div>`;
+    },plugins:{legend:{position:'bottom',labels:{color:cd.text,font:{family:'Epilogue',size:11},padding:12}},tooltip:{backgroundColor:cd.bg,titleColor:isDark()?'#e8edf5':'#0f172a',bodyColor:cd.text,borderColor:'#1e2d45',borderWidth:1,callbacks:{label:c=>`K${c.parsed.toFixed(2)}`}}}}});
 
     // Best day of week — uses filtered completed sales
     const dowLabels = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -1838,10 +1863,22 @@ function renderDashboard() {
   }
   filteredSales.filter(s=>s.status==='completed').forEach(s=>{if(days[s.date])days[s.date].amount+=s.amount||0;});
   const dayArr = Object.values(days);
+
+  // Build previous period data for comparison overlay
+  const prevDays = {};
+  for (let i=_pd-1;i>=0;i--) {
+    const d=new Date(); d.setDate(d.getDate()-i-_pd);
+    const k=d.toISOString().split('T')[0];
+    prevDays[k]=0;
+  }
+  filteredSales.filter(s=>s.status==='completed').forEach(s=>{if(s.date in prevDays)prevDays[s.date]+=(s.amount||0);});
+  const prevArr = Object.values(prevDays);
+
   destroyChart('daily');
   const ctx3 = document.getElementById('chart-daily').getContext('2d');
   const gradBar = ctx3.createLinearGradient(0,0,0,180); gradBar.addColorStop(0,'rgba(59,130,246,0.9)'); gradBar.addColorStop(1,'rgba(59,130,246,0.4)');
-  state.charts['daily'] = new Chart(ctx3,{type:'bar',data:{labels:dayArr.map(d=>d.label),datasets:[{label:'Sales',data:dayArr.map(d=>d.amount),backgroundColor:gradBar,borderRadius:6,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{backgroundColor:cd.bg,titleColor:isDark()?'#e8edf5':'#0f172a',bodyColor:cd.text,borderColor:'#1e2d45',borderWidth:1,callbacks:{label:c=>`K${c.parsed.y.toFixed(2)}`}}},scales:sharedAxes}});
+  const compareDatasets = state.dashCompare ? [{label:'Previous period',data:prevArr,borderColor:isDark()?'rgba(255,255,255,0.25)':'rgba(0,0,0,0.18)',backgroundColor:'transparent',type:'line',tension:0.4,borderWidth:1.5,borderDash:[4,3],pointRadius:0}] : [];
+  state.charts['daily'] = new Chart(ctx3,{type:'bar',data:{labels:dayArr.map(d=>d.label),datasets:[{label:'Sales',data:dayArr.map(d=>d.amount),backgroundColor:gradBar,borderRadius:6,borderSkipped:false},...compareDatasets]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:state.dashCompare,labels:{color:cd.text,font:{family:'Epilogue',size:11},boxWidth:12}},tooltip:{backgroundColor:cd.bg,titleColor:isDark()?'#e8edf5':'#0f172a',bodyColor:cd.text,borderColor:'#1e2d45',borderWidth:1,callbacks:{label:c=>c.parsed.y!=null?`K${c.parsed.y.toFixed(2)}`:''}}},scales:sharedAxes}});
 
   // Top products — uses filtered sales
   const topProds = Object.entries(filteredSales.reduce((m,s)=>{m[s.product]=(m[s.product]||0)+(s.amount||0);return m;},{})).sort((a,b)=>b[1]-a[1]).slice(0,5);
@@ -3890,37 +3927,6 @@ function renderSettings() {
 
     <div class="settings-card">
       <div class="settings-card-title">
-        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-        Staff Login PIN
-      </div>
-      <div class="settings-card-desc">Set the PIN your staff use to log in. Staff can record sales, expenses and returns but cannot edit/delete records, view Reports, Inventory management, or Settings.<br><br><span style="color:var(--muted);font-size:11px">Default staff PIN: <strong style="color:var(--accent)">0000</strong></span></div>
-      <button class="btn btn-primary" onclick="changeStaffPin()">
-        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-        Change Staff PIN
-      </button>
-    </div>
-
-    <div class="settings-card">
-      <div class="settings-card-title">
-        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 15.5v-10A2.5 2.5 0 0 1 5.5 3h13A2.5 2.5 0 0 1 21 5.5z"/><polyline points="3 9 12 14 21 9"/></svg>
-        Cloud Sync
-      </div>
-      <div class="settings-card-desc">Data syncs across all your devices via Firestore. Open this file on any phone and your records will appear automatically.</div>
-      ${permErr ? `
-        <div style="background:rgba(245,54,92,0.1);border:1px solid rgba(245,54,92,0.3);border-radius:10px;padding:12px 14px;margin-bottom:14px;font-size:12.5px;line-height:1.6;color:var(--text)">
-          <strong style="color:var(--red)">⚠️ Firestore rules blocking sync</strong><br>
-          Go to <strong>console.firebase.google.com</strong> → your project → Firestore Database → Rules, and replace with:<br>
-          <code style="display:block;margin-top:8px;background:var(--card2);padding:8px;border-radius:6px;font-size:11px;color:var(--accent)">allow read, write: if true;</code>
-        </div>` : ''}
-      <div class="status-pill ${online && !permErr ? 'online' : 'offline'}">
-        ${online && !permErr ? '● Syncing' : permErr ? '⚠️ Rules error' : '◉ Offline'}
-      </div>
-      <div id="last-sync-time" style="font-size:11px;color:var(--muted);margin-top:6px">Last sync: ${syncTime}</div>
-      <div style="font-size:12px;color:var(--muted);margin-top:8px">${state.sales.length} sales · ${state.expenses.length} expenses · ${state.returns.length} returns · ${state.inventory.length} products</div>
-    </div>
-
-    <div class="settings-card">
-      <div class="settings-card-title">
         <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
         How to use on other devices
       </div>
@@ -4005,6 +4011,11 @@ function printReport() { window.print(); }
 // ═══════════════════════════════════════════════════════════
 function setDashPeriod(p) {
   state.dashPeriod = p;
+  destroyChart('daily');
+  renderDashboard();
+}
+function toggleDashCompare() {
+  state.dashCompare = !state.dashCompare;
   destroyChart('daily');
   renderDashboard();
 }
