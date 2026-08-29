@@ -410,6 +410,7 @@ td.num{font-family:var(--font-mono); font-size:12.5px;}
     <div class="tracker-toolbar">
       <button class="btn btn-primary" id="newOrderBtn">+ New Inquiry</button>
       <input class="search-input" id="searchInput" placeholder="Search customer, order no, product…">
+      <button class="btn btn-ghost" id="exportTrackerBtn">⭳ Export CSV</button>
     </div>
     <div id="filterChipWrap"></div>
     <div class="table-wrap">
@@ -428,6 +429,7 @@ td.num{font-family:var(--font-mono); font-size:12.5px;}
     <p class="section-sub">Closed orders, full history retained.</p>
     <div class="tracker-toolbar">
       <input class="search-input" id="archiveSearch" placeholder="Search completed orders…">
+      <button class="btn btn-ghost" id="exportArchiveBtn">⭳ Export CSV</button>
     </div>
     <div class="table-wrap">
       <table id="archiveTable">
@@ -474,8 +476,15 @@ td.num{font-family:var(--font-mono); font-size:12.5px;}
 (function(){
 "use strict";
 
+// Declared up front (not near the bottom, where it's used elsewhere) so that
+// fatalError() can safely reference it even if it's called during the very
+// first synchronous checks below — a `let` referenced before its declaration
+// throws a ReferenceError, which would otherwise silently break error display.
+let bootResolved = false;
+let suppressAuthListener = false;
+
 function fatalError(msg){
-  if(typeof bootResolved !== 'undefined') bootResolved = true;
+  bootResolved = true;
   const el = document.getElementById('authScreen');
   el.innerHTML = `<div class="auth-card">
     <div class="auth-title">Couldn't connect</div>
@@ -551,7 +560,7 @@ const HOLDABLE = ['CONTACTED','ORDER_CONFIRMED','PAYMENT_CONFIRMED','IN_PRODUCTI
 const CANCELLABLE = ['NEW','CONTACTED','ORDER_CONFIRMED','PAYMENT_CONFIRMED'];
 
 /* ============ STATE ============ */
-let state = { orders: [], staff: [], currentUser: null, role: null, filter: null, search: '', archiveSearch:'', pendingWrites:false, fromCache:false, browserOnline: (typeof navigator!=='undefined'?navigator.onLine:true) };
+let state = { orders: [], staff: [], currentUser: null, role: null, filter: null, search: '', archiveSearch:'', browserOnline: (typeof navigator!=='undefined'?navigator.onLine:true) };
 let openOrderId = null;
 
 /* ============ STORAGE (Supabase) ============ */
@@ -563,17 +572,18 @@ async function saveOrder(order){
   }catch(e){ console.error('save failed', e); toast('Could not save — check your connection.'); }
 }
 let ordersChannel = null;
+let refetchOrders = async ()=>{};
 async function startOrdersListener(){
-  const refetch = async ()=>{
+  refetchOrders = async ()=>{
     const { data, error } = await sb.from(ORDERS_TABLE).select('data');
     if(error){ console.error(error); toast('Sync error — check your connection.'); return; }
     state.orders = data.map(row=>row.data);
     render();
   };
-  await refetch();
+  await refetchOrders();
   if(ordersChannel) sb.removeChannel(ordersChannel);
   ordersChannel = sb.channel('bmc_orders_changes')
-    .on('postgres_changes', {event:'*', schema:'public', table:ORDERS_TABLE}, refetch)
+    .on('postgres_changes', {event:'*', schema:'public', table:ORDERS_TABLE}, refetchOrders)
     .subscribe();
 }
 
@@ -671,6 +681,7 @@ async function loadSampleData(){
   const rows = seedOrders.map(o=>({ id:o.id, data:o, updated_at:new Date().toISOString() }));
   const { error } = await sb.from(ORDERS_TABLE).upsert(rows);
   if(error){ console.error(error); toast('Could not load sample data — check your connection.'); return; }
+  await refetchOrders();
   toast('Sample orders loaded');
 }
 
@@ -835,12 +846,7 @@ document.getElementById('searchInput').addEventListener('input', e=>{ state.sear
 /* ============ ARCHIVE ============ */
 function renderArchive(){
   const body = document.getElementById('archiveBody');
-  let os = state.orders.filter(o=>o.status==='COMPLETED' || o.status==='DELIVERED');
-  if(state.archiveSearch){
-    const q = state.archiveSearch.toLowerCase();
-    os = os.filter(o => o.orderNo.toLowerCase().includes(q) || o.customer.name.toLowerCase().includes(q));
-  }
-  os = os.slice().sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
+  const os = archiveOrders();
   if(!os.length){ body.innerHTML = `<tr><td colspan="6"><div class="empty-state"><div class="glyph">✺</div>Nothing archived yet — completed orders land here automatically.</div></td></tr>`; return; }
   body.innerHTML = os.map(o=>{
     const deliveredH = o.history.find(h=>h.label==='Delivered');
@@ -855,7 +861,49 @@ function renderArchive(){
   }).join('');
   wireRowClicks(body.parentElement);
 }
+function archiveOrders(){
+  let os = state.orders.filter(o=>o.status==='COMPLETED' || o.status==='DELIVERED');
+  if(state.archiveSearch){
+    const q = state.archiveSearch.toLowerCase();
+    os = os.filter(o => o.orderNo.toLowerCase().includes(q) || o.customer.name.toLowerCase().includes(q));
+  }
+  return os.slice().sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
+}
 document.getElementById('archiveSearch').addEventListener('input', e=>{ state.archiveSearch = e.target.value; renderArchive(); });
+
+/* ============ CSV EXPORT ============ */
+function csvCell(v){
+  const s = (v===null || v===undefined) ? '' : String(v);
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
+}
+function ordersToCSV(orders){
+  const headers = ['Order No','Customer','Contact','Location','Product','Qty','Price (ZMW)','Deposit (ZMW)','Balance (ZMW)','Status','Created','Production Deadline','Delivery Deadline','Note'];
+  const rows = orders.map(o=>[
+    o.orderNo, o.customer.name||'', o.customer.contact||'', o.customer.location||'',
+    o.product||'', o.qty||'', o.price||0, o.deposit||0, o.balance||0,
+    statusLabel(o.status), o.createdAt?o.createdAt.slice(0,10):'',
+    o.prodDeadline||'', o.deliveryDeadline||'', o.note||''
+  ]);
+  return [headers, ...rows].map(r=>r.map(csvCell).join(',')).join('\r\n');
+}
+function downloadCSV(filename, csvText){
+  const blob = new Blob(['\uFEFF'+csvText], {type:'text/csv;charset=utf-8;'}); // BOM so Excel reads it correctly
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+document.getElementById('exportTrackerBtn').addEventListener('click', ()=>{
+  const os = filteredOrders();
+  if(!os.length){ toast('Nothing to export yet.'); return; }
+  downloadCSV(`bmc-tracker-${todayISO()}.csv`, ordersToCSV(os));
+});
+document.getElementById('exportArchiveBtn').addEventListener('click', ()=>{
+  const os = archiveOrders();
+  if(!os.length){ toast('Nothing to export yet.'); return; }
+  downloadCSV(`bmc-archive-${todayISO()}.csv`, ordersToCSV(os));
+});
 
 /* ============ DRAWER ============ */
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -1204,6 +1252,8 @@ function render(){
   renderTracker();
   renderArchive();
   updateBell();
+  // Keep an open drawer in sync with real-time updates from other devices/staff.
+  if(openOrderId && state.orders.some(o=>o.id===openOrderId)) openDrawer(openOrderId);
 }
 function persistAndRender(order){
   render();
@@ -1382,8 +1432,6 @@ async function checkBootstrapAndShowAuth(){
 // Watchdog: if nothing has resolved the "Connecting…" screen within 15s — including
 // cases where the auth listener itself never fires, which some embedded/in-app
 // browsers do — stop waiting and show an actionable error instead of hanging forever.
-let bootResolved = false;
-let suppressAuthListener = false;
 setTimeout(()=>{
   if(!bootResolved){
     fatalError("This is taking too long to connect, which usually means this in-app browser is blocking the connection. Try opening the link in Chrome (or your phone's default browser) instead of here.");
