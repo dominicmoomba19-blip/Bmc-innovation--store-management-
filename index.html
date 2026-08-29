@@ -458,7 +458,7 @@ td.num{font-family:var(--font-mono); font-size:12.5px;}
     </div>
     <div class="table-wrap">
       <table id="staffTable">
-        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Added</th></tr></thead>
+        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Added</th><th>Access</th></tr></thead>
         <tbody id="staffBody"></tbody>
       </table>
     </div>
@@ -990,7 +990,10 @@ function drawerHTML(order){
     </div>
 
     <div class="dsection">
-      <div class="dsection-title">Order details</div>
+      <div class="dsection-title">
+        Order details
+        ${(state.role==='Admin/Owner' || state.role==='Front Desk') ? `<button class="btn btn-ghost btn-sm" id="editDetailsBtn" style="float:right;">Edit</button>` : ''}
+      </div>
       <div class="info-grid">
         <div class="info-item"><div class="k">Contact</div><div class="v">${esc(order.customer.contact)||'—'}</div></div>
         <div class="info-item"><div class="k">Location</div><div class="v">${esc(order.customer.location)||'—'}</div></div>
@@ -1048,6 +1051,8 @@ function openDrawer(id){
   if(holdBtn) holdBtn.addEventListener('click', ()=> putOnHold(order));
   const cancelBtn = document.getElementById('cancelBtn');
   if(cancelBtn) cancelBtn.addEventListener('click', ()=> cancelOrder(order));
+  const editBtn = document.getElementById('editDetailsBtn');
+  if(editBtn) editBtn.addEventListener('click', ()=> openEditOrderModal(order));
 }
 function closeDrawer(){
   document.getElementById('drawer').classList.remove('open');
@@ -1234,6 +1239,61 @@ function openNewInquiryModal(){
 }
 document.getElementById('newOrderBtn').addEventListener('click', openNewInquiryModal);
 
+function openEditOrderModal(order){
+  openModal(`
+    <div class="modal-head"><div class="modal-title">Edit ${order.orderNo}</div><button class="drawer-close" id="mClose">✕</button></div>
+    <div class="modal-body">
+      <div class="field" id="f-ename"><label>Customer name</label><input id="in-ename" value="${esc(order.customer.name)}"><div class="field-error">Customer name is required.</div></div>
+      <div class="field" id="f-econtact"><label>Contact number</label><input id="in-econtact" value="${esc(order.customer.contact)}"><div class="field-error">Contact number is required.</div></div>
+      <div class="field"><label>Location</label><input id="in-eloc" value="${esc(order.customer.location)}"></div>
+      <div class="field"><label>Product</label><input id="in-eproduct" value="${esc(order.product)}"></div>
+      <div class="field"><label>Quantity</label><input id="in-eqty" type="number" min="1" value="${order.qty||1}"></div>
+      <div class="field"><label>Price (ZMW)</label><input id="in-eprice" type="number" min="0" value="${order.price||0}"></div>
+      <div class="field"><label>Deposit paid (ZMW)</label><input id="in-edeposit" type="number" min="0" value="${order.deposit||0}"></div>
+      <div class="field"><label>Production deadline</label><input id="in-eproddl" type="date" value="${order.prodDeadline||''}"></div>
+      <div class="field"><label>Delivery deadline</label><input id="in-edeliverydl" type="date" value="${order.deliveryDeadline||''}"></div>
+      <div class="field"><label>Note</label><textarea id="in-enote">${esc(order.note)}</textarea></div>
+    </div>
+    <div class="modal-foot"><button class="btn btn-ghost" id="mCancel">Cancel</button><button class="btn btn-primary" id="mSave">Save Changes</button></div>
+  `, ()=>{
+    document.getElementById('mClose').onclick = closeModal;
+    document.getElementById('mCancel').onclick = closeModal;
+    document.getElementById('mSave').onclick = ()=>{
+      const name = document.getElementById('in-ename').value.trim();
+      const contact = document.getElementById('in-econtact').value.trim();
+      let ok = true;
+      document.getElementById('f-ename').classList.toggle('error', !name); if(!name) ok=false;
+      document.getElementById('f-econtact').classList.toggle('error', !contact); if(!contact) ok=false;
+      if(!ok) return;
+
+      const price = Number(document.getElementById('in-eprice').value)||0;
+      const deposit = Number(document.getElementById('in-edeposit').value)||0;
+      const changes = [];
+      if(order.customer.name!==name) changes.push('customer name');
+      if(order.customer.contact!==contact) changes.push('contact');
+      if(order.price!==price) changes.push('price');
+      if(order.deposit!==deposit) changes.push('deposit');
+
+      order.customer.name = name;
+      order.customer.contact = contact;
+      order.customer.location = document.getElementById('in-eloc').value.trim();
+      order.product = document.getElementById('in-eproduct').value.trim();
+      order.qty = Number(document.getElementById('in-eqty').value)||1;
+      order.price = price;
+      order.deposit = deposit;
+      order.balance = Math.max(0, price - deposit);
+      order.prodDeadline = document.getElementById('in-eproddl').value || null;
+      order.deliveryDeadline = document.getElementById('in-edeliverydl').value || null;
+      order.note = document.getElementById('in-enote').value.trim();
+
+      pushHistory(order, 'Details edited', changes.length ? `Updated: ${changes.join(', ')}` : 'Details updated');
+      closeModal();
+      persistAndRender(order);
+      toast('Order updated');
+    };
+  });
+}
+
 /* ============ NOTIFICATIONS BELL ============ */
 function updateBell(){
   document.getElementById('bellDot').style.display = globalNotifs.length ? 'block':'none';
@@ -1302,8 +1362,23 @@ function renderStaff(){
   if(!body) return;
   const list = state.staff.slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
   body.innerHTML = list.length ? list.map(s=>`
-    <tr><td data-label="Name">${esc(s.name)}</td><td data-label="Email">${esc(s.email)}</td><td data-label="Role">${esc(s.role)}</td><td data-label="Added">${s.created_at?fmtDate(s.created_at.slice(0,10)):'—'}</td></tr>
-  `).join('') : `<tr><td colspan="4"><div class="empty-state">No staff accounts yet — add the first one.</div></td></tr>`;
+    <tr>
+      <td data-label="Name">${esc(s.name)}${s.active===false?' <span style="color:var(--red); font-size:11px;">(deactivated)</span>':''}</td>
+      <td data-label="Email">${esc(s.email)}</td>
+      <td data-label="Role">${esc(s.role)}</td>
+      <td data-label="Added">${s.created_at?fmtDate(s.created_at.slice(0,10)):'—'}</td>
+      <td data-label="Access">${s.id===state.currentUser.uid ? '<span style="color:var(--text-faint); font-size:12px;">(you)</span>' : `<button class="btn btn-ghost btn-sm staff-toggle-btn" data-id="${s.id}" data-active="${s.active!==false}">${s.active===false?'Reactivate':'Deactivate'}</button>`}</td>
+    </tr>
+  `).join('') : `<tr><td colspan="5"><div class="empty-state">No staff accounts yet — add the first one.</div></td></tr>`;
+  body.querySelectorAll('.staff-toggle-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=> toggleStaffActive(btn.dataset.id, btn.dataset.active==='true'));
+  });
+}
+async function toggleStaffActive(staffId, currentlyActive){
+  const { error } = await sb.from(STAFF_TABLE).update({ active: !currentlyActive }).eq('id', staffId);
+  if(error){ console.error(error); toast('Could not update — check your connection.'); return; }
+  await refreshStaff();
+  toast(currentlyActive ? 'Account deactivated' : 'Account reactivated');
 }
 function openAddStaffModal(){
   openModal(`
@@ -1518,7 +1593,10 @@ sb.auth.onAuthStateChange(async (event, session)=>{
     try{
       const { data: staffRow, error } = await sb.from(STAFF_TABLE).select('*').eq('id', user.id).maybeSingle();
       if(error) throw error;
-      if(staffRow){
+      if(staffRow && staffRow.active===false){
+        await sb.auth.signOut();
+        showAuthScreen('login', 'This account has been deactivated. Contact your Admin.');
+      } else if(staffRow){
         state.currentUser = { uid:user.id, email:user.email, name:staffRow.name, role:staffRow.role };
         state.role = staffRow.role;
         showApp();
