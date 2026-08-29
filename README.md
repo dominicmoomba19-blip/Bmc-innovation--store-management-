@@ -1,2 +1,2 @@
-# Shade-s-apparel-store-management-
+# BMC-Innovations-store-management-
 Management 
