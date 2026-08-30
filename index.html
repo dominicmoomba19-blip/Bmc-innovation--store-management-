@@ -585,12 +585,59 @@ let openOrderId = null;
 
 /* ============ STORAGE (Supabase) ============ */
 function newOrderId(){ return 'o' + Math.random().toString(36).slice(2,10) + Date.now().toString(36); }
+
+// Offline support: if a save fails (no signal), queue it in localStorage instead of losing
+// the change. Flushed automatically on reconnect, and once at startup in case the app was
+// closed while something was still pending from a previous session.
+const PENDING_KEY = 'bmc_pending_orders_v1';
+function loadPending(){
+  try{ return JSON.parse(localStorage.getItem(PENDING_KEY)) || {}; }
+  catch(e){ return {}; }
+}
+function savePending(map){
+  try{ localStorage.setItem(PENDING_KEY, JSON.stringify(map)); }
+  catch(e){ console.error('could not persist pending queue', e); }
+}
+function pendingCount(){ return Object.keys(loadPending()).length; }
+
 async function saveOrder(order){
   try{
     const { error } = await sb.from(ORDERS_TABLE).upsert({ id: order.id, data: order, updated_at: new Date().toISOString() });
     if(error) throw error;
-  }catch(e){ console.error('save failed', e); toast('Could not save — check your connection.'); }
+    // If this order had a stale pending copy queued from an earlier failed save, clear it —
+    // this save superseded it.
+    const pending = loadPending();
+    if(pending[order.id]){ delete pending[order.id]; savePending(pending); renderSyncPill(); }
+  }catch(e){
+    console.error('save failed, queuing for later', e);
+    const pending = loadPending();
+    pending[order.id] = order; // last write wins if the same order fails more than once
+    savePending(pending);
+    renderSyncPill();
+    toast("Saved on this device — will sync once you're back online");
+  }
 }
+async function flushPendingOrders(){
+  const pending = loadPending();
+  const ids = Object.keys(pending);
+  if(!ids.length) return;
+  let succeeded = 0;
+  for(const id of ids){
+    try{
+      const { error } = await sb.from(ORDERS_TABLE).upsert({ id, data: pending[id], updated_at: new Date().toISOString() });
+      if(error) throw error;
+      delete pending[id];
+      succeeded++;
+    }catch(e){
+      console.error('retry failed for', id, e);
+      // leave it queued, try again next time
+    }
+  }
+  savePending(pending);
+  renderSyncPill();
+  if(succeeded) toast(`Synced ${succeeded} pending change${succeeded===1?'':'s'}`);
+}
+
 let ordersChannel = null;
 let refetchOrders = async ()=>{};
 async function startOrdersListener(){
@@ -605,6 +652,7 @@ async function startOrdersListener(){
   ordersChannel = sb.channel('bmc_orders_changes')
     .on('postgres_changes', {event:'*', schema:'public', table:ORDERS_TABLE}, refetchOrders)
     .subscribe();
+  await flushPendingOrders();
 }
 
 /* ============ UTIL ============ */
@@ -1313,16 +1361,25 @@ document.addEventListener('click', ()=> document.getElementById('notifPop').clas
 function renderSyncPill(){
   const el = document.getElementById('syncPill');
   if(!el) return;
+  const pending = pendingCount();
   if(!state.browserOnline){
     el.className = 'sync-pill show offline';
-    el.innerHTML = `<span class="dot"></span>Offline`;
+    el.innerHTML = pending
+      ? `<span class="dot"></span>Offline — ${pending} pending`
+      : `<span class="dot"></span>Offline`;
+  } else if(pending){
+    el.className = 'sync-pill show syncing';
+    el.innerHTML = `<span class="dot"></span>Syncing ${pending}…`;
   } else {
     el.className = 'sync-pill';
     el.innerHTML = '';
   }
 }
 window.addEventListener('online', ()=>{ state.browserOnline = true; renderSyncPill(); toast('Back online — syncing changes'); startOrdersListener(); });
-window.addEventListener('offline', ()=>{ state.browserOnline = false; renderSyncPill(); toast("You're offline — changes won't save until you're back"); });
+window.addEventListener('offline', ()=>{ state.browserOnline = false; renderSyncPill(); toast("You're offline — changes will be saved on this device and synced once you're back"); });
+// Belt-and-braces: on flaky mobile signal, the browser doesn't always fire 'online'/'offline'
+// reliably. Check the pending queue periodically regardless.
+setInterval(()=>{ if(state.browserOnline && pendingCount()) flushPendingOrders(); }, 30000);
 
 function render(){
   renderTabsBar();
@@ -1461,17 +1518,20 @@ function openPurgeConfirmModal(){
     document.getElementById('mCancel').onclick = closeModal;
     document.getElementById('mConfirmPurge').onclick = async ()=>{
       const btn = document.getElementById('mConfirmPurge');
-      btn.textContent = 'Deleting…'; btn.disabled = true;
+      btn.textContent = 'Backing up & deleting…'; btn.disabled = true;
       const ids = eligible.map(o=>o.id);
+      // Always back up what's about to be deleted first — a purge should never be a one-way
+      // door with no record of what was removed.
+      downloadCSV(`bmc-purged-${todayISO()}.csv`, ordersToCSV(eligible));
       try{
         const { error } = await sb.from(ORDERS_TABLE).delete().in('id', ids);
         if(error) throw error;
         await refetchOrders();
         closeModal();
-        toast(`Deleted ${ids.length} order${ids.length===1?'':'s'}`);
+        toast(`Backed up & deleted ${ids.length} order${ids.length===1?'':'s'}`);
       }catch(e){
         btn.textContent = 'Yes, delete permanently'; btn.disabled = false;
-        toast('Could not delete — check your connection.');
+        toast('Backup downloaded, but delete failed — check your connection and try again.');
       }
     };
   });
