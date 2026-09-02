@@ -106,6 +106,17 @@ button{font-family:inherit; cursor:pointer;}
 .sync-pill.syncing .dot{animation:pulse-dot 1s ease-in-out infinite;}
 @keyframes pulse-dot{0%,100%{opacity:1;} 50%{opacity:.3;}}
 
+#noticeBanner{
+  display:flex; align-items:flex-start; gap:12px;
+  margin:0 16px 18px; padding:12px 14px;
+  background:var(--amber-soft); border:1px solid rgba(212,175,55,.35); border-radius:var(--radius-sm);
+}
+#noticeBanner .notice-icon{font-size:16px; line-height:1.4;}
+#noticeBanner .notice-body{flex:1; min-width:0;}
+#noticeBanner .notice-text{font-size:13.5px; color:var(--text); line-height:1.5; white-space:pre-wrap;}
+#noticeBanner .notice-meta{font-size:11px; color:var(--text-dim); margin-top:4px;}
+#noticeBanner .notice-close{background:none; border:none; color:var(--text-dim); font-size:16px; cursor:pointer; padding:0 2px; line-height:1;}
+
 /* ============ AUTH SCREEN ============ */
 .auth-wrap{
   position:fixed; inset:0; z-index:100; display:flex; align-items:center; justify-content:center; padding:20px;
@@ -394,6 +405,8 @@ td.num{font-family:var(--font-mono); font-size:12.5px;}
     </div>
   </div>
 
+  <div id="noticeBanner" class="hidden"></div>
+
   <div class="tabs" id="tabsBar">
     <button class="tab active" data-tab="dashboard">Dashboard</button>
     <button class="tab" data-tab="tracker">Tracker</button>
@@ -460,6 +473,18 @@ td.num{font-family:var(--font-mono); font-size:12.5px;}
       <table id="staffTable">
         <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Added</th><th>Access</th></tr></thead>
         <tbody id="staffBody"></tbody>
+      </table>
+    </div>
+
+    <h1 class="section-title" style="margin-top:36px;">Notices</h1>
+    <p class="section-sub">Posted notices show as a banner to every staff member, on every tab, until they dismiss it.</p>
+    <div class="tracker-toolbar">
+      <button class="btn btn-primary" id="sendNoticeBtn">+ Send Notice</button>
+    </div>
+    <div class="table-wrap">
+      <table id="noticesTable">
+        <thead><tr><th>Message</th><th>Sent</th><th></th></tr></thead>
+        <tbody id="noticesBody"></tbody>
       </table>
     </div>
 
@@ -536,6 +561,7 @@ try{
 }
 const ORDERS_TABLE = 'bmc_orders';
 const STAFF_TABLE = 'bmc_staff';
+const NOTICES_TABLE = 'bmc_notices';
 
 /* ============ CONSTANTS ============ */
 const ROLES = ["Front Desk","Production","QC/Delivery","Delivery","Admin/Owner"];
@@ -580,7 +606,7 @@ const HOLDABLE = ['CONTACTED','ORDER_CONFIRMED','PAYMENT_CONFIRMED','IN_PRODUCTI
 const CANCELLABLE = ['NEW','CONTACTED','ORDER_CONFIRMED','PAYMENT_CONFIRMED'];
 
 /* ============ STATE ============ */
-let state = { orders: [], staff: [], currentUser: null, role: null, filter: null, search: '', archiveSearch:'', browserOnline: (typeof navigator!=='undefined'?navigator.onLine:true) };
+let state = { orders: [], staff: [], notices: [], currentUser: null, role: null, filter: null, search: '', archiveSearch:'', browserOnline: (typeof navigator!=='undefined'?navigator.onLine:true) };
 let openOrderId = null;
 
 /* ============ STORAGE (Supabase) ============ */
@@ -654,6 +680,107 @@ async function startOrdersListener(){
     .subscribe();
   await flushPendingOrders();
 }
+
+/* ============ NOTICES ============ */
+const DISMISSED_NOTICES_KEY = 'bmc_dismissed_notices_v1';
+function loadDismissedNoticeIds(){
+  try{ return JSON.parse(localStorage.getItem(DISMISSED_NOTICES_KEY)) || []; }
+  catch(e){ return []; }
+}
+function dismissNotice(id){
+  const dismissed = loadDismissedNoticeIds();
+  if(!dismissed.includes(id)){
+    dismissed.push(id);
+    try{ localStorage.setItem(DISMISSED_NOTICES_KEY, JSON.stringify(dismissed)); }catch(e){}
+  }
+  renderNoticeBanner();
+}
+let noticesChannel = null;
+async function startNoticesListener(){
+  const refetchNotices = async ()=>{
+    const { data, error } = await sb.from(NOTICES_TABLE).select('*').order('created_at', {ascending:false});
+    if(error){ console.error(error); return; }
+    state.notices = data;
+    renderNoticeBanner();
+    if(state.role==='Admin/Owner') renderNoticesAdmin();
+  };
+  await refetchNotices();
+  if(noticesChannel) sb.removeChannel(noticesChannel);
+  noticesChannel = sb.channel('bmc_notices_changes')
+    .on('postgres_changes', {event:'*', schema:'public', table:NOTICES_TABLE}, refetchNotices)
+    .subscribe();
+}
+function renderNoticeBanner(){
+  const el = document.getElementById('noticeBanner');
+  if(!el) return;
+  const dismissed = loadDismissedNoticeIds();
+  const latest = state.notices.find(n=>!dismissed.includes(n.id));
+  if(!latest){ el.classList.add('hidden'); el.innerHTML=''; return; }
+  el.classList.remove('hidden');
+  el.innerHTML = `
+    <div class="notice-icon">📣</div>
+    <div class="notice-body">
+      <div class="notice-text">${esc(latest.message)}</div>
+      <div class="notice-meta">${esc(latest.created_by)} · ${fmtDate(latest.created_at.slice(0,10))}</div>
+    </div>
+    <button class="notice-close" id="noticeDismissBtn" title="Dismiss">✕</button>
+  `;
+  document.getElementById('noticeDismissBtn').addEventListener('click', ()=> dismissNotice(latest.id));
+}
+function renderNoticesAdmin(){
+  const body = document.getElementById('noticesBody');
+  if(!body) return;
+  if(!state.notices.length){
+    body.innerHTML = `<tr><td colspan="3"><div class="empty-state">No notices sent yet.</div></td></tr>`;
+    return;
+  }
+  body.innerHTML = state.notices.map(n=>`
+    <tr>
+      <td data-label="Message" style="white-space:pre-wrap;">${esc(n.message)}</td>
+      <td data-label="Sent">${fmtDate(n.created_at.slice(0,10))} — ${esc(n.created_by)}</td>
+      <td><button class="btn btn-ghost btn-sm notice-delete-btn" data-id="${n.id}">Delete</button></td>
+    </tr>
+  `).join('');
+  body.querySelectorAll('.notice-delete-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=> deleteNotice(btn.dataset.id));
+  });
+}
+async function deleteNotice(id){
+  const { error } = await sb.from(NOTICES_TABLE).delete().eq('id', id);
+  if(error){ console.error(error); toast('Could not delete — check your connection.'); return; }
+  toast('Notice deleted');
+}
+function openSendNoticeModal(){
+  openModal(`
+    <div class="modal-head"><div class="modal-title">Send notice to all staff</div><button class="drawer-close" id="mClose">✕</button></div>
+    <div class="modal-body">
+      <div class="field" id="f-noticemsg"><label>Message</label><textarea id="in-noticemsg" placeholder="e.g. Shop closed Monday for stock-take"></textarea><div class="field-error">Enter a message.</div></div>
+    </div>
+    <div class="modal-foot"><button class="btn btn-ghost" id="mCancel">Cancel</button><button class="btn btn-primary" id="mSend">Send Notice</button></div>
+  `, ()=>{
+    document.getElementById('mClose').onclick = closeModal;
+    document.getElementById('mCancel').onclick = closeModal;
+    document.getElementById('mSend').onclick = async ()=>{
+      const message = document.getElementById('in-noticemsg').value.trim();
+      document.getElementById('f-noticemsg').classList.toggle('error', !message);
+      if(!message) return;
+      const btn = document.getElementById('mSend');
+      btn.textContent = 'Sending…'; btn.disabled = true;
+      try{
+        const { error } = await sb.from(NOTICES_TABLE).insert({
+          message, created_by: state.currentUser.name || state.currentUser.email
+        });
+        if(error) throw error;
+        closeModal();
+        toast('Notice sent to all staff');
+      }catch(e){
+        btn.textContent = 'Send Notice'; btn.disabled = false;
+        toast('Could not send — check your connection.');
+      }
+    };
+  });
+}
+document.getElementById('sendNoticeBtn')?.addEventListener('click', openSendNoticeModal);
 
 /* ============ UTIL ============ */
 function uid(){ return 'o' + Math.random().toString(36).slice(2,10); }
@@ -763,7 +890,7 @@ function setActiveTab(tab){
     const el = document.getElementById('view-'+v);
     if(el) el.classList.toggle('hidden', v!==tab);
   });
-  if(tab==='staff') renderStaff();
+  if(tab==='staff'){ renderStaff(); renderNoticesAdmin(); }
 }
 function wireTabs(){
   document.querySelectorAll('#tabsBar .tab').forEach(btn=>{
@@ -1385,6 +1512,7 @@ function render(){
   renderTabsBar();
   renderUserChip();
   renderSyncPill();
+  renderNoticeBanner();
   renderStats();
   renderTracker();
   renderArchive();
@@ -1589,6 +1717,7 @@ function showAuthScreen(mode, errorMsg){
           bootResolved = true;
           showApp();
           await startOrdersListener();
+          await startNoticesListener();
           await refreshStaff();
           render();
         } finally { suppressAuthListener = false; }
@@ -1661,6 +1790,7 @@ sb.auth.onAuthStateChange(async (event, session)=>{
         state.role = staffRow.role;
         showApp();
         await startOrdersListener();
+        await startNoticesListener();
         if(state.role==='Admin/Owner') await refreshStaff();
         render();
       } else {
